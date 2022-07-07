@@ -1,0 +1,1334 @@
+= Extension Proposal
+:source-highlighter: pygments
+:source-language: cpp
+
+== SYCL PIM Extension
+
+Extension proposal for the integration of PIM operations into SYCL.
+
+[cols=",",options="header",]
+|=======================================================================
+|Proposal ID |Samsung-001
+|Name |User-Driven Runtime Kernel Fusion
+
+|Date of Creation |30 March 2022
+
+|Last Update |20 June 2022
+
+|Version |v0.2
+
+|Target |SYCL 2020 vendor extension
+
+|Current Status |_Work In Progress_
+
+|Implemented in |_N/A_
+
+|Reply-to |Lukas Sommer lukas.sommer@codeplay.com
+
+|Original author |Lukas Sommer lukas.sommer@codeplay.com
+
+|Contributors |Gordon Brown gordon@codeplay.com, Kumudha Narasimhan
+kumudha.narasimhan@codeplay.com, Lukas Sommer lukas.sommer@codeplay.com,
+Mehdi Goli mehdi.goli@codeplay.com, Ruyman Reyes ruyman@codeplay.com,
+Victor Lomüller victor@codeplay.com
+
+|Reviewer |Hyesun Hong hyesun.hong@samsung.com
+|=======================================================================
+
+<<<
+
+=== TL;DR
+Most of existing heterogeneous programming models does not include the concept of _memory with compute_. 
+As far as we know, this document is the first SYCL extension for _Processing in Memory_ (PIM).
+PIM operations such as gemv and element-wise add/mult should be seamlessly integrated into the SYCL programming model so that users can access them in a clear and simple fashion. 
+
+
+=== Introduction
+
+Memory technology and in particular memory bandwidth has not been
+keeping up with improvements in processing throughput and computational
+performance of CPUs and accelerators in recent years. Even with a
+tighter integration of memory and processing elements, for example
+through 2.5D/3D stacking of HBM and accelerators, memory bandwidth is
+still limited by physical limitations and packaging and interconnect
+technology.
+
+As a consequence, the performance of many applications is limited by the
+available memory bandwidth. One approach to improve the performance of
+such memory-bound applications is to move the computation closer to the
+required data/memory. _Processing in Memory_ (PIM) integrates
+computational units directly with the memory, and can lift the burden of
+limited memory bandwidth by exploiting the much higher internal
+bandwidth of many memory units and by employing high levels of
+parallelism, e.g., by concurrently computing across different dies and
+banks.
+
+An open problem is the integration of the PIM operation model into
+existing heterogeneous programming models such as SYCL. This extension
+aims to propose a design to integrate PIM operations into the SYCL
+programming model.
+
+=== Goals
+
+This proposal tries to achieve the following goals with its
+implementation:
+
+* Seamlessly integrate PIM operations into the SYCL programming model to
+make them available to users in an easy-to-use and comprehensible
+manner.
+* Enable users to run PIM operations and non-PIM kernels (i.e., regular
+device kernels and host tasks) within the same application and on the
+same memory objects (i.e., `sycl::buffer`).
+* Integrate PIM operations into SYCL's dependency tracking and
+scheduling and allow users to easily express dependencies between
+multiple PIM operations and also non-PIM kernels.
+
+=== Scope
+
+While this proposal seeks to achieve a number of goals discussed above,
+it also considers some things as out-of-scope for this proposal. These
+won't be supported by implementations of this proposal:
+
+* Support for _Unified Shared Memory_ (USM). The computational units
+integrated into PIM blocks typically do not have access to host memory
+and as such cannot benefit from USM.
+* Mixture of PIM operations and non-PIM execution in the same SYCL
+kernel. This is not supported by PIM SDKs available at the time of
+writing. The PIM operations might require the launch of specialised
+device kernels for certain PIM operations. Within the PIM SDK, these
+specialised kernels are still allowed to mix operation in the PIM block
+and on the regular device's resources. Besides having limited support in
+SDKs, the specialization of memory makes it also hard to support PIM and
+non-PIM in the same kernel. PIM operation often requires the memory to
+be allocated in special regions of memory, which might exhibit different
+performance characteristics (e.g., in terms of caching behaviour) than
+regular device memory accessed by the non-PIM code executing on the
+regular device. While mixing PIM and non-PIM in the same _kernel_ is
+considered out-of-scope for this proposal, mixing PIM and non-PIM in the
+same _application_ is definitely a goal for this proposal, see above.
+
+=== Design Idea
+
+The basic idea of this proposal is to make the existing SYCL memory
+objects, in particular `sycl::buffer`, available for PIM execution.
+
+To this end, users must be able to request access to this memory objects
+in the PIM memory region and specify data dependencies for the correct
+ordering of commands such as kernel functions, copy operations and PIM
+operations. In regular SYCL applications, this role is fulfilled by the
+`sycl::accessor`. As memory in the PIM region should only be used by PIM
+operations and the access might require additional specifiers, a
+dedicated `sycl::ext::samsung::pim_accessor` is introduced. This
+`pim_accessor` will fulfil a similar role to the regular accessor for
+PIM operations. While it's design is inspired by the regular
+`sycl::accessor`, it's more lightweight construct, owning to the fact
+that it will not be used inside device code.
+
+The mechanism for accessing PIM operations from command-group scope was
+inspired by the existing functions for explicit memory operations, e.g.,
+`sycl::handler::fill(...)` or `sycl::handler::copy(...)`. In order to
+not clutter the `sycl::handler` with many additional PIM operations and
+to highlight the semantic difference of sending commands to the attached
+PIM blocks rather than the regular GPU device, a separate
+`sycl::ext::samsung::pim_handler` is introduced, which will provide
+access to the PIM operations.
+
+These core design ideas are complemented by supporting elements, e.g.,
+device aspects and selectors.
+
+=== Extension
+
+==== Device Aspects
+
+In addition to the device aspects defined in
+https://www.khronos.org/registry/SYCL/specs/sycl-2020/html/sycl-2020.html#sec:device-aspects[§4.6.4.3]
+of the SYCL 2020 specification, this extension defines the following
+device aspects.
+
+Table 1. Device aspects defined by this extension
+
+[width="100%",cols="50%,50%",options="header",]
+|=======================================================================
+|Aspect |Description
+|`aspect::pim` a|
+
+A dedicated accelerator device for executing PIM operations.
+
+It uses the SYCL API, but programmable kernels cannot be dispatched to
+the device, only fixed functionality is available.
+
+Devices with this aspect have device type `info::device_type::custom`.
+|=======================================================================
+
+==== Device Selector
+
+In addition to the device selectors defined in
+https://www.khronos.org/registry/SYCL/specs/sycl-2020/html/sycl-2020.html#sec:device-selector[§4.6.1.1]
+of the SYCL 2020 spec, this extension adds the following pre-defined
+device selector.
+
+Table 2. Specialised device selectors included in this extension
+
+[width="100%",cols="50%,50%",options="header",]
+|=======================================================================
+|SYCL device selectors |Description
+|`pim_selector_v` a|
+Select a SYCL device supporting PIM operations, i.e., a device for which
+device type is `info::device_type::custom` and which has `aspect::pim`.
+
+The SYCL class constructor using it must thrown an `exception` with the
+`errc::runtime` error code if no device matching this requirement can be
+found.
+
+|=======================================================================
+
+==== PIM Accessor for Commands
+
+The `sycl::ext::samsung::pim_accessor` class provides access to data in
+a `buffer` for a PIM operation. It accesses the contents of the buffer
+via the device's PIM memory region or the device's global memory,
+depending on the executed operation.
+
+Construction of a `pim_accessor` creates requirements in the same way as
+the `sycl::accessor` and therefore creates the same data dependencies as
+a `sycl::accessor`, described by
+https://www.khronos.org/registry/SYCL/specs/sycl-2020/html/sycl-2020.html#sub.section.memmodel.app[§3.8.1]
+of the SYCL 2020 specification.
+
+The dimensionality of the accessor must match the underlying buffer.
+
+Note that, with the current design, it is impossible to construct an
+`accessor` and a `pim_accessor` in the same command-group. To construct
+an `accessor`, a `handler` is required, while for the `pim_accessor`, a
+`pim_handler` is required. Because the command-group function can only
+take either a `handler` _or_ a `pim_handler` as an argument, it is
+impossible to construct an `accessor` and `pim_accessor` in the same
+command group scope/function, and consequently, the SYCL runtime doesn't
+need to be able to resolve such a situation.
+
+===== *Interface for PIM command accessors*
+
+[[cb1]]
+[source,cpp]
+----
+namespace sycl {
+namespace ext {
+namespace samsung {
+
+  template <typename DataT,
+            int Dimensions = 1,
+            access_mode AccessMode = 
+              (std::is_const_v<DataT> ? access_mode::read
+                                      : access_mode::write)>
+  class pim_accessor {
+
+  public:
+
+    using size_type = size_t;
+
+    template <typename AllocatorT>
+    pim_accessor(buffer<DataT, Dimensions, AllocatorT> &bufferRef, 
+                pim_handler &pimHandlerRef,
+                const property_list &propList = {});
+
+    template <typename AllocatorT>
+    pim_accessor(buffer<DataT, Dimensions, AllocatorT> &bufferRef, 
+                pim_handler &pimHandlerRef, range<Dimensions> accessRange,
+                const property_list &propList = {});
+
+    template <typename AllocatorT>
+    pim_accessor(buffer<DataT, Dimensions, AllocatorT> &bufferRef, 
+                pim_handler &pimHandlerRef, range<Dimensions> accessRange,
+                id<Dimensions> accessOffset,
+                const property_list &propList = {});
+
+    template <typename AllocatorT, typename TagT>
+    pim_accessor(buffer<DataT, Dimensions, AllocatorT> &bufferRef, 
+                pim_handler &pimHandlerRef, TagT tag,
+                const property_list &propList = {});
+
+    template <typename AllocatorT, typename TagT>
+    pim_accessor(buffer<DataT, Dimensions, AllocatorT> &bufferRef, 
+                pim_handler &pimHandlerRef, range<Dimensions> accessRange,
+                TagT tag, const property_list &propList = {});
+
+    template <typename AllocatorT, typename TagT>
+    pim_accessor(buffer<DataT, Dimensions, AllocatorT> &bufferRef, 
+                pim_handler &pimHandlerRef, range<Dimensions> accessRange,
+                id<Dimensions> accessOffset, TagT tag,
+                const property_list &propList = {});
+
+    size_type byte_size() const noexcept;
+
+    size_type size() const noexcept;
+
+    size_type max_size() const noexcept;
+
+    bool empty() const noexcept;
+
+    /* Available only when: (Dimensions > 0) */
+    range<Dimensions> get_range() const;
+
+    /* Available only when: (Dimensions > 0) */
+    id<Dimensions> get_offset() const;
+  };
+}
+}
+}
+----
+
+Table 3. Constructors of the `sycl::ext::samsung::pim_accessor` class
+
+[width="100%",cols="60%,40%",options="header",]
+|=======================================================================
+|Constructor |Description
+a|
+[[cb2]]
+[source,cpp]
+----
+template <typename AllocatorT>
+pim_accessor(buffer<DataT, Dimensions,
+                    AllocatorT> &bufferRef, 
+              pim_handler &pimHandlerRef,
+              const property_list &propList = 
+                  {});
+----
+
+a|
+Available only when `(Dimensions > 0)`.
+
+Constructs a `pim_accessor` for accessing a `buffer` within a PIM
+operation on the `queue` associated with `pimHandlerRef`.
+
+The optional `property_list` provides properties for the constructed
+accessor.
+
+a|
+[[cb3]]
+[source,cpp]
+----
+template <typename AllocatorT>
+pim_accessor(buffer<DataT, Dimensions, 
+                    AllocatorT> &bufferRef, 
+              pim_handler &pimHandlerRef, 
+              range<Dimensions> accessRange,
+              const property_list &propList = 
+                  {});
+----
+
+a|
+Available only when `(Dimensions > 0)`.
+
+Constructs a `pim_accessor` that is a ranged accessor, where the range
+starts at the beginning of the `buffer`. The accessor can only be used
+within a PIM operation on the `queue` associated with `pimHandlerRef`.
+
+The optional `property_list` provides properties for the constructed
+accessor.
+
+Throws an `exception` with the `errc::invalid` error code if
+`accessRange` exceeds the range of `bufferRef` in any dimension.
+
+a|
+[[cb4]]
+[source,cpp]
+----
+template <typename AllocatorT>
+pim_accessor(buffer<DataT, Dimensions, 
+                    AllocatorT> &bufferRef, 
+              pim_handler &pimHandlerRef, 
+              range<Dimensions> accessRange,
+              id<Dimensions> accessOffset,
+              const property_list &propList = 
+                  {});
+----
+
+a|
+Available only when `(Dimensions > 0)`.
+
+Constructs a `pim_accessor` that is a ranged accessor, where the range
+starts at an offset from the beginning of the `buffer`. The accessor can
+only be used within a PIM operation on the `queue` associated with
+`pimHandlerRef`.
+
+The optional `property_list` provides properties for the constructed
+accessor.
+
+Throws an `exception` with the `errc::invalid` error code if the sum of
+`accessRange` and `accessOffset` exceeds the range of `bufferRef` in any
+dimension.
+
+a|
+[[cb5]]
+[source,cpp]
+----
+template <typename AllocatorT, typename TagT>
+pim_accessor(buffer<DataT, Dimensions,
+                    AllocatorT> &bufferRef, 
+              pim_handler &pimHandlerRef,
+              TagT tag,
+              const property_list &propList = 
+                  {});
+----
+
+a|
+Available only when `(Dimensions > 0)`.
+
+Constructs a `pim_accessor` for accessing a `buffer` within a PIM
+operation on the `queue` associated with `pimHandlerRef`.
+
+The tag is used to deduce template arguments of the accessor as 
+described in table 4.
+
+The optional `property_list` provides properties for the constructed
+accessor.
+
+a|
+[[cb6]]
+[source,cpp]
+----
+template <typename AllocatorT, typename TagT>
+pim_accessor(buffer<DataT, Dimensions, 
+                    AllocatorT> &bufferRef, 
+              pim_handler &pimHandlerRef, 
+              range<Dimensions> accessRange,
+              TagT tag,
+              const property_list &propList = 
+                  {});
+----
+
+a|
+Available only when `(Dimensions > 0)`.
+
+Constructs a `pim_accessor` that is a ranged accessor, where the range
+starts at the beginning of the `buffer`. The accessor can only be used
+within a PIM operation on the `queue` associated with `pimHandlerRef`.
+
+The tag is used to deduce template arguments of the accessor as 
+described in table 4.
+
+The optional `property_list` provides properties for the constructed
+accessor.
+
+Throws an `exception` with the `errc::invalid` error code if
+`accessRange` exceeds the range of `bufferRef` in any dimension.
+
+a|
+[[cb7]]
+[source,cpp]
+----
+template <typename AllocatorT, typename TagT>
+pim_accessor(buffer<DataT, Dimensions, 
+                    AllocatorT> &bufferRef, 
+              pim_handler &pimHandlerRef, 
+              range<Dimensions> accessRange,
+              id<Dimensions> accessOffset,
+              TagT tag,
+              const property_list &propList = 
+                  {});
+----
+
+a|
+Available only when `(Dimensions > 0)`.
+
+Constructs a `pim_accessor` that is a ranged accessor, where the range
+starts at an offset from the beginning of the `buffer`. The accessor can
+only be used within a PIM operation on the `queue` associated with
+`pimHandlerRef`.
+
+The tag is used to deduce template arguments of the accessor as 
+described in table 4.
+
+The optional `property_list` provides properties for the constructed
+accessor.
+
+Throws an `exception` with the `errc::invalid` error code if the sum of
+`accessRange` and `accessOffset` exceeds the range of `bufferRef` in any
+dimension.
+
+|=======================================================================
+
+
+
+Some `pim_accessor` constructors take a `TagT` parameter, 
+which is used to deduce template arguments. 
+The permissible values for this parameter are listed in Table 4,
+along with the access mode that they imply.
+
+Table 4. Enumeration of tags available for `pim_accessor` construction.
+[width="100%",cols="50%,50%",options="header",]
+|=======================================================================
+|Tag value |Access mode
+|`read_write` |`access_mode::read_write`
+|`read_only`  |`access_mode::read`
+|`write_only` |`access_mode::write`
+|=======================================================================
+
+The `pim_accessor` supports the `property::no_init` as defined by
+https://www.khronos.org/registry/SYCL/specs/sycl-2020/html/sycl-2020.html#_properties_2[§4.7.6.4]
+of the SYCL 2020 specification.
+
+For the description of the member functions `byte_size()`, `size()`,
+`max_size()`, `empty()`, and `get_range()`, refer to the corresponding
+descriptions in _Table 79. Common buffer and local accessor member
+functions Member function_ in
+https://www.khronos.org/registry/SYCL/specs/sycl-2020/html/sycl-2020.html#sec:accessor.common.members[§4.7.6.12]
+of the SYCL 2020 specification.
+
+For the description of the member function `get_offset()`, refer to the
+corresponding description in _Table 56. Member functions of the accessor
+class_ in
+https://www.khronos.org/registry/SYCL/specs/sycl-2020/html/sycl-2020.html#_interface_for_buffer_command_accessors[§4.7.6.9.1]
+of the SYCL 2020 specification.
+
+<<<
+
+==== PIM Operation `sycl::ext::samsung::pim_handler` class
+
+A PIM operation handler object can only be constructed by the SYCL
+runtime. All PIM accessors (`pim_accessor`) defined in command-group
+scope take as a parameter an instance of the PIM operation handler, and
+all the PIM operation invocation functions are member functions of this
+class.
+
+The PIM operation handler can only be associated with a `sycl::queue`
+for which the underlying device has `aspect::pim`. At the time of
+writing, the PIM device does not support `aspect::queue_profiling`, so
+the associated `sycl::queue` should not be constructed with
+`property::queue::enable_profiling`.
+
+It is disallowed for an instance of the SYCL `pim_handler` class to be
+moved or copied.
+
+[[cb8]]
+[source,cpp]
+----
+namespace sycl {
+namespace ext {
+namespace samsung {
+
+class pim_handler {
+
+public:
+
+  pim_handler(___unspecified___);
+
+  template <typename DataT, int Dimensions, access_mode OutMode, 
+            access_mode Op0Mode, access_mode Op1Mode>
+  void elementwise_add(pim_accessor<DataT, Dimensions, OutMode> output, 
+                        pim_accessor<DataT, Dimensions, Op0Mode> operand0,
+                        pim_accesssor<DataT, Dimensions, Op1Mode> operand1);
+
+  template <typename DataT, int Dimensions, access_mode OutMode, 
+            access_mode VecMode>
+  void elementwise_add(pim_accessor<DataT, Dimensions, OutMode> output, 
+                        DataT scalar,
+                        pim_accesssor<DataT, Dimensions, VecMode> vec);
+
+  template <typename DataT, int Dimensions, access_mode OutMode, 
+            access_mode Op0Mode, access_mode Op1Mode>
+  void elementwise_mul(pim_accessor<DataT, Dimensions, OutMode> output, 
+                        pim_accessor<DataT, Dimensions, Op0Mode> operand0,
+                        pim_accesssor<DataT, Dimensions, Op1Mode> operand1);
+
+  template <typename DataT, int Dimensions, access_mode OutMode, 
+            access_mode VecMode>
+  void elementwise_mul(pim_accessor<DataT, Dimensions, OutMode> output, 
+                        DataT scalar,
+                        pim_accesssor<DataT, Dimensions, VecMode> vec);
+
+
+
+  template <typename DataT, int Dimensions, access_mode OutMode, 
+            access_mode InMode>
+  void relu(pim_accessor<DataT, Dimensions, OutMode> output,
+            pim_accesssor<DataT, Dimensions, InMode> input);
+
+  template <typename DataT, int OutDim, access_mode OutMode,
+            int VecDim, access_mode VecMode,
+            int MatDim, access_mode MatMode>
+  void gemv(pim_accessor<DataT, OutDim, OutMode> output,
+            pim_accessor<DataT, VecDim, VecMode> vec,
+            pim_accessor<DataT, MatDim, MatMode> matrix);
+
+  template <typename DataT, int OutDim, access_mode OutMode,
+            int VecDim, access_mode VecMode,
+            int MatDim, access_mode MatMode>
+  void gemv_add(pim_accessor<DataT, OutDim, OutMode> output,
+            pim_accessor<DataT, VecDim, VecMode> vec,
+            pim_accessor<DataT, MatDim, MatMode> matrix);
+
+  template <typename DataT, int OutDim, access_mode OutMode,
+            int VecDim, access_mode VecMode,
+            int MatDim, access_mode MatMode,
+            int AddDim, access_mode AddMode>
+  void gemv_add(pim_accessor<DataT, OutDim, OutMode> output,
+            pim_accessor<DataT, VecDim, VecMode> vec,
+            pim_accessor<DataT, MatDim, MatMode> matrix,
+            pim_accessor<DataT, AddDim, AddMode> addIn,
+            bool fuseRelu);
+
+  template <typename DataT, int DataDim, access_mode OutMode,
+            access_mode InMode, int ValDim, access_mode BetaMode,
+            access_mode GammaMode, access_mode MeanMode, 
+            access_mode VarianceMode>
+  void batch_norm(pim_accessor<DataT, DataDim, OutMode> output,
+                  pim_accessor<DataT, DataDim, InMode> input,
+                  pim_accessor<DataT, ValDim, BetaMode> beta,
+                  pim_accessor<DataT, ValDim, GammaMode> gamma,
+                  pim_accessor<DataT, ValDim, MeanMode> mean,
+                  pim_accessor<DataT, ValDim, VarianceMode> variance,
+                  DataT epsilon);
+  
+};
+
+}
+}
+}
+----
+
+<<<
+
+Table 5. Constructors of the `sycl::ext::samsung::pim_handler` class
+
+[width="100%",cols="50%,50%",options="header",]
+|===============================================
+|Constructor |Description
+a|
+[[cb9]]
+[source,cpp]
+----
+pim_handler(___unspecified___);
+----
+
+|Unspecified implementation-defined constructor.
+|===============================================
+
+Table 6. Member functions of the `sycl::ext::samsung::pim_handler` class
+
+[width="100%",cols="60%,40%",options="header",]
+|=======================================================================
+|Member function |Description
+a|
+[[cb10]]
+[source,cpp]
+----
+template <typename DataT, 
+          int Dimensions, 
+          access_mode OutMode, 
+          access_mode Op0Mode, 
+          access_mode Op1Mode>
+void elementwise_add(pim_accessor<DataT, 
+                                  Dimensions, 
+                                  OutMode> 
+                          output, 
+                      pim_accessor<DataT, 
+                                    Dimensions, 
+                                    Op0Mode> 
+                          operand0,
+                      pim_accessor<DataT, 
+                                    Dimensions, 
+                                    Op1Mode> 
+                          operand1);
+----
+
+a|
+Performs element-wise addition of `operand0` and `operand1` and stores
+the result in `output`.
+
+The number of elements in `operand0`, `operand1`, and `output` must be
+identical.
+
+a|
+[[cb11]]
+[source,cpp]
+----
+template <typename DataT, 
+          int Dimensions, 
+          access_mode OutMode, 
+          access_mode VecMode>
+void elementwise_add(pim_accessor<DataT, 
+                                  Dimensions, 
+                                  OutMode> 
+                          output, 
+                      DataT scalar,
+                      pim_accessor<DataT, 
+                                    Dimensions, 
+                                    VecMode> 
+                          vec);
+----
+
+a|
+Adds `scalar` to each element in `vec` and stores the result in
+`output`.
+
+The number of elements in `vec` and `output` must be identical.
+
+a|
+[[cb12]]
+[source,cpp]
+----
+template <typename DataT, 
+          int Dimensions, 
+          access_mode OutMode, 
+          access_mode Op0Mode, 
+          access_mode Op1Mode>
+void elementwise_mul(pim_accessor<DataT, 
+                                  Dimensions, 
+                                  OutMode> 
+                          output, 
+                      pim_accessor<DataT,
+                                    Dimensions, 
+                                    Op0Mode> 
+                          operand0,
+                      pim_accessor<DataT, 
+                                    Dimensions, 
+                                    Op1Mode> 
+                          operand1);
+----
+
+a|
+Performs element-wise multiplication of `operand0` and `operand1` and
+stores the result in `output`.
+
+The number of elements in `operand0`, `operand1`, and `output` must be
+identical.
+
+a|
+[[cb13]]
+[source,cpp]
+----
+template <typename DataT, 
+          int Dimensions, 
+          access_mode OutMode, 
+          access_mode VecMode>
+void elementwise_mul(pim_accessor<DataT, 
+                                  Dimensions, 
+                                  OutMode> 
+                          output, 
+                      DataT scalar,
+                      pim_accessor<DataT, 
+                                    Dimensions, 
+                                    VecMode> 
+                          vec);
+----
+
+a|
+Multiplies `scalar` with each element in `vec` and stores the result in
+`output`.
+
+The number of elements in `vec` and `output` must be identical.
+
+a|
+[[cb14]]
+[source,cpp]
+----
+template <typename DataT, 
+          int Dimensions, 
+          access_mode OutMode, 
+          access_mode InMode>
+void relu(pim_accessor<DataT, Dimensions, 
+                        OutMode> output,
+          pim_accesssor<DataT, Dimensions, 
+                        InMode> input);
+----
+
+a|
+Performs rectification of each element in `input` and stores the result
+in `output`.
+
+The number of elements in `input` and `output` must be identical.
+
+a|
+[[cb15]]
+[source,cpp]
+----
+template <typename DataT, 
+          int OutDim, access_mode OutMode,
+          int VecDim, access_mode VecMode,
+          int MatDim, access_mode MatMode>
+void gemv(pim_accessor<DataT, OutDim, 
+                        OutMode> output,
+          pim_accessor<DataT, VecDim, 
+                        VecMode> vec,
+          pim_accessor<DataT, MatDim, 
+                        MatMode> matrix);
+----
+
+a|
+Computes the GEMV multiplication of `vec` and `matrix`, storing the
+result in `output`.
+
+For the operands and result, the following layouts, given as
+`range<3>{c, h, w}`, are required:
+
+* `vec` : `range<3>{C, 1, X}`
+* `matrix` : `range<3>{C, Y, X}`
+* `output` : `range<3>{C, 1, Y}`
+
+a|
+[[cb16]]
+[source,cpp]
+----
+template <typename DataT, 
+          int OutDim, access_mode OutMode,
+          int VecDim, access_mode VecMode,
+          int MatDim, access_mode MatMode>
+void gemv_add(pim_accessor<DataT, OutDim, 
+                            OutMode> output,
+          pim_accessor<DataT, VecDim, 
+                        VecMode> vec,
+          pim_accessor<DataT, MatDim, 
+                        MatMode> matrix);
+----
+
+a|
+Computes the GEMV multiplication of `vec` and `matrix`, and adds the
+result to `output` element-wise, storing the result again in `output`.
+
+For the operands and result, the following layouts, given as
+`range<3>{c, h, w}`, are required:
+
+* `vec` : `range<3>{C, 1, X}`
+* `matrix` : `range<3>{C, Y, X}`
+* `output` : `range<3>{C, 1, Y}`
+
+a|
+[[cb17]]
+[source,cpp]
+----
+template <typename DataT, 
+          int OutDim, access_mode OutMode,
+          int VecDim, access_mode VecMode,
+          int MatDim, access_mode MatMode,
+          int AddDim, access_mode AddMode>
+void gemv_add(pim_accessor<DataT, OutDim, 
+                            OutMode> output,
+          pim_accessor<DataT, 
+                        VecDim, VecMode> vec,
+          pim_accessor<DataT, MatDim, 
+                        MatMode> matrix,
+          pim_accessor<DataT, AddDim, 
+                        AddMode> addIn,
+          bool fuseRelu);
+----
+
+a|
+Computes the GEMV multiplication of `vec` and `matrix`, and adds the
+result to `addIn` element-wise, storing the result in `output`.
+
+If `fuseRelu` is `true`, performs rectification for each element of the
+result before storing in `output`.
+
+For the operands and result, the following layouts, given as
+`range<3>{c, h, w}`, are required:
+
+* `vec` : `range<3>{C, 1, X}`
+* `matrix` : `range<3>{C, Y, X}`
+* `addIn` : `range<3>{C, 1, Y}`
+* `output` : `range<3>{C, 1, Y}`
+
+a|
+[[cb18]]
+[source,cpp]
+----
+template <typename DataT, int DataDim, 
+          access_mode OutMode,
+          access_mode InMode, 
+          int ValDim, 
+          access_mode BetaMode,
+          access_mode GammaMode, 
+          access_mode MeanMode, 
+          access_mode VarianceMode>
+void batch_norm(pim_accessor<DataT, DataDim, 
+                              OutMode> output,
+                pim_accessor<DataT, DataDim, 
+                              InMode> input,
+                pim_accessor<DataT, ValDim, 
+                              BetaMode> beta,
+                pim_accessor<DataT, ValDim, 
+                              GammaMode> gamma,
+                pim_accessor<DataT, ValDim, 
+                              MeanMode> mean,
+                pim_accessor<DataT, ValDim, 
+                              VarianceMode> var,
+                DataT epsilon);
+----
+
+a|
+Performs batch-normalization for each element in `input`, using the
+parameters given by `beta`, `gamma`, `mean`, and `variance`, storing the
+result in `output`.
+
+The number of elements in `input` and `output` must be identical.
+
+The number of elements in `beta`, `gamma`, `mean`, and `variance` must
+be identical to the number of channels.
+
+|=======================================================================
+
+==== PIM Queue Wrapper `sycl::ext::samsung::pim_queue` class
+
+At the time of writing, the memory on GPUs with Samsung PIM support is
+split into two parts. The first part can be used for executing PIM
+operations and the memory is managed by the PIM driver. This part can
+also be accessed by the GPU. The second part behaves just as regular GPU
+memory and cannot be used by the PIM blocks for PIM operations. It is
+controlled by the GPU's regular driver. In essence, there's a part of
+the memory which is not visible to the PIM blocks for operations.
+
+To match the fact that this part of the memory is invisible to the PIM
+blocks, the SYCL platform model in
+https://www.khronos.org/registry/SYCL/specs/sycl-2020/html/sycl-2020.html#sec:platformmodel[§3.5]
+suggest that even though the GPU and PIM blocks physically reside in the
+same device, they should be treated as two separate devices. As a
+consequence, the GPU and the PIM blocks are also controlled by (at
+least) two different queues on different contexts.
+
+Libraries such as SYCL-DNN typically select the most appropriate
+implementation for an algorithm internally and might therefore want to
+internally decide whether a computation is placed on the PIM blocks or
+on the GPU. This means they would need access to both queues, but
+typically accept only a single `queue` on their interface.
+
+To overcome this limitation and allow libraries to internally switch
+between PIM and GPU with their existing interface, a construct wrapping
+both queues is introduced as part of this extension.
+
+It provides access to both queues, one for PIM and one for the GPU (or
+another alternative device) and can be used with the existing library
+interfaces.
+
+This construct is only required as long as the PIM blocks can only
+access parts of the memory. Once this underlying limitation is lifted,
+this construct will not be necessary anymore.
+
+[[cb19]]
+[source,cpp]
+----
+namespace sycl {
+namespace ext {
+namespace samsung {
+
+  class pim_queue : public queue {
+
+  public: 
+
+    template <typename PIMDeviceSelector, typename GPUDeviceSelector>
+    pim_queue(const PIMDeviceSelector &pimSelector, 
+                const GPUDeviceSelector &gpuSelector,
+                const property_list &propList = {});
+
+    template <typename PIMDeviceSelector, typename GPUDeviceSelector>
+    pim_queue(const PIMDeviceSelector &pimSelector, 
+                const GPUDeviceSelector &gpuSelector,
+                const async_handler &asyncHandler,
+                const property_list &propList = {});
+
+    queue& get_pim_queue() const;
+
+    queue& get_gpu_queue() const;
+
+  };
+
+}
+}
+}
+----
+
+Table 7. Constructors of the `sycl::ext::samsung::pim_queue` class.
+
+[width="100%",cols="60%,40%",options="header",]
+|=======================================================================
+|Constructor |Description
+a|
+[[cb20]]
+[source,cpp]
+----
+template <typename PIMDeviceSelector, 
+          typename GPUDeviceSelector>
+pim_queue(const PIMDeviceSelector &pimSelector, 
+            const GPUDeviceSelector &gpuSelector,
+            const property_list &propList = {});
+----
+
+|Constructs a `pim_queue` wrapping two queues. The PIM queue is
+constructed using the device returned by the device selector provided as
+`pimSelector`. The GPU queue is constructed using the device returned by
+the device selector provided as `gpuSelector`. Zero or more properties
+can be provided to both constructed SYCL queues via an instance of
+`property_list`.
+
+a|
+[[cb21]]
+[source,cpp]
+----
+template <typename PIMDeviceSelector, 
+          typename GPUDeviceSelector>
+pim_queue(const PIMDeviceSelector &pimSelector, 
+            const GPUDeviceSelector &gpuSelector,
+            const async_handler &asyncHandler,
+            const property_list &propList = {});
+----
+
+|Constructs a `pim_queue` wrapping two queues. The PIM queue is
+constructed with an `async_handler` using the device returned by the
+device selector provided as `pimSelector`. The GPU queue is constructed
+with an `async_handler` using the device returned by the device selector
+provided as `gpuSelector`. Zero or more properties can be provided to
+both constructed SYCL queues via an instance of `property_list`.
+|=======================================================================
+
+As `pim_queue` inherits from `queue`, it exposes the same member
+functions. The following table describes the semantics of each of the
+inherited member functions.
+
+Table 8. Inherited member functions for `sycl::ext::samsung::pim_queue`
+class.
+
+[width="100%",cols="50%,50%",options="header",]
+|=======================================================================
+|Inherited member function |Description
+a|
+[[cb22]]
+[source,cpp]
+----
+backend get_backend() const noexcept
+----
+
+|Returns a `backend` identifying the SYCL backend associated with the
+GPU queue.
+
+a|
+[[cb23]]
+[source,cpp]
+----
+context get_context() const
+----
+
+|Returns the GPU queue's context. Reports errors using the SYCL
+exception classes. The value returned must be equal to that returned by
+`get_info<info::queue::context>()`.
+
+a|
+[[cb24]]
+[source,cpp]
+----
+device get_device() const
+----
+
+|Returns the SYCL device the GPU queue is associated with. Reports
+errors using the SYCL exception classes. The value returned must be
+equal to that returned by `get_info<info::queue::device>()`.
+
+a|
+[[cb25]]
+[source,cpp]
+----
+bool is_in_order() const
+----
+
+|Returns true if the GPU queue was created with the `in_order` property.
+Equivalent to `has_property<property::queue::in_order>()`.
+
+a|
+[[cb26]]
+[source,cpp]
+----
+void wait()
+----
+
+|Performs a blocking wait for the completion of all enqueued tasks in
+both queues. Synchronous errors will be reported through SYCL
+exceptions.
+
+a|
+[[cb27]]
+[source,cpp]
+----
+void wait_and_throw()
+----
+
+|Performs a blocking wait for the completion of all enqueued tasks in
+both queues. Synchronous errors will be reported through SYCL
+exceptions. Any unconsumed asynchronous errors will be passed to the
+`async_handler` associated with the queues or enclosing context. If no
+user defined `async_handler` is associated with the queue or enclosing
+context, then an implementation-defined default `async_handler` is
+called to handle any errors, as described in
+https://www.khronos.org/registry/SYCL/specs/sycl-2020/html/sycl-2020.html#subsubsec:exception.nohandler[Section
+4.13.1.2].
+
+a|
+[[cb28]]
+[source,cpp]
+----
+void throw_asynchronous()
+----
+
+|Checks to see if any unconsumed asynchronous errors have been produced
+by both queues and if so reports them by passing them to the
+`async_handler` associated with the queue or enclosing context. If no
+user defined `async_handler` is associated with the queue or enclosing
+context, then an implementation-defined default `async_handler` is
+called to handle any errors, as described in
+https://www.khronos.org/registry/SYCL/specs/sycl-2020/html/sycl-2020.html#subsubsec:exception.nohandler[Section
+4.13.1.2].
+
+a|
+[[cb29]]
+[source,cpp]
+----
+template <typename Param>
+typename Param::return_type 
+  get_info() const
+----
+
+|Queries the GPU queue for information requested by the template
+parameter `Param`. The type alias `Param::return_type` must be defined
+in accordance with the info parameters in
+https://www.khronos.org/registry/SYCL/specs/sycl-2020/html/sycl-2020.html#_queue_information_descriptors[Table
+30] to facilitate returning the type associated with the `Param`
+parameter.
+
+a|
+[[cb30]]
+[source,cpp]
+----
+template <typename T>
+event submit(T cgf)
+----
+
+|Submit a command group function object to the wrapper. In case the
+given command group function object requires a `pim_handler` to execute,
+the command group function object will be submitted to the PIM queue.
+Otherwise, the command group function object is submitted to the GPU
+queue.
+
+a|
+[[cb31]]
+[source,cpp]
+----
+template <typename T>
+event submit(T cgf, queue & secondaryQueue)
+----
+
+a|
+Submit a command group function object to the wrapper. In case the given
+command group function object requires a `pim_handler` to execute, the
+command group function object will be submitted to the PIM queue.
+Otherwise, the command group function object is submitted to the GPU
+queue.
+
+On a kernel error, this command group function object is then scheduled
+for execution on the secondary queue. Returns an event, which
+corresponds to the queue the command group function object is being
+enqueued on.
+
+a|
+[[cb32]]
+[source,cpp]
+----
+template <typename Param>
+typename Param::return_type 
+  get_backend_info() const
+----
+
+|Queries the GPU queue for information requested by the template
+parameter `Param`. The type alias `Param::return_type` must be defined
+in accordance with the SYCL backend specification. Must throw an
+exception with the `errc::backend_mismatch` error code if the SYCL
+backend that corresponds with `Param` is different from the SYCL backend
+that is associated with the GPU queue.
+|=======================================================================
+
+In addition to the inherited member functions,
+`sycl::ext::samsung::pim_queue` defines two member functions.
+
+Table 9. Additional member functions of `pim_queue`.
+
+[width="100%",cols="50%,50%",options="header",]
+|=================================================================
+|Member function |Description
+a|
+[[cb33]]
+[source,cpp]
+----
+queue& get_pim_queue() const
+----
+
+|Returns a reference to the PIM queue wrapped by this `pim_queue`.
+a|
+[[cb34]]
+[source,cpp]
+----
+queue& get_gpu_queue() const;
+----
+
+|Returns a reference to the GPU queue wrapped by this `pim_queue`.
+|=================================================================
+
+The `pim_queue` also inherits all shortcut functions defined for the
+SYCL `queue` in
+https://www.khronos.org/registry/SYCL/specs/sycl-2020/html/sycl-2020.html#sec:queue-shortcuts[table
+29] of the SYCL 2020 specification.
+
+When called, these shortcut functions are called on the GPU queue
+wrapped by the `pim_queue`.
+
+<<<
+
+=== Usage Examples
+
+The following examples demonstrates the use of the proposed extension.
+It also shows how PIM operations and non-PIM kernels executing on the
+GPU can be mixed in the same application and how PIM operations
+integrate into dependency/requirements tracking.
+
+Example 1. Interaction of PIM and non-PIM kernels.
+
+[[cb35]]
+[source,cpp]
+----
+#include <CL/sycl.hpp>
+
+using namespace sycl;
+
+class GPUKernelOne;
+class GPUKernelTwo;
+
+int main(){
+  constexpr size_t dataSize = 1024;
+  sycl::half in1[dataSize], in2[dataSize], in3[dataSize], in4[dataSize], out[dataSize];
+
+  queue gpu_queue{gpu_selector{}};
+  queue pim_queue{pim_selector{}};
+
+  {
+    // Regular SYCL buffers. 
+    buffer<sycl::half> bIn1{in1, range{dataSize}};
+    buffer<sycl::half> bIn2{in2, range{dataSize}};
+    buffer<sycl::half> bIn3{in3, range{dataSize}};
+    buffer<sycl::half> bIn4{in4, range{dataSize}};
+    buffer<sycl::half> bOut{out, range{dataSize}};
+
+    // Regular, i.e., non-PIM, SYCL kernel, using the buffers and operating 
+    // on the GPU without PIM operations and using GPU memory.
+    gpu_queue.submit([&](handler& cgh){
+      auto accIn1 = bIn1.get_access<access_mode::read>(cgh);
+      auto accIn2 = bIn2.get_access<access_mode::read_write>(cgh);
+      cgh.parallel_for<GPUKernelOne>(dataSize, /* Some SYCL GPU kernel */);
+    });
+
+    // PIM operation, using the buffers from above. 
+    // Scheduling and dependency resolution in the SYCL runtime 
+    //will ensure that this PIM operation will be executed only after
+    // the GPU kernel above is done, due to the dependency on bIn2.
+    pim_queue.submit([&](ext::samsung::pim_handler& ph){
+      ext::samsung::pim_accessor pAccIn2{bIn2, ph, read_only};
+      ext::samsung::pim_accessor pAccIn3{bIn3, ph, read_only};
+      ext::samsung::pim_accessor pAccIn4{bIn4, ph, write_only};
+      ph.elementwise_add(pAccIn4, pAccIn2, pAccIn3);
+    });
+
+    // Another regular, i.e., non-PIM, SYCL kernel operating 
+    // on the GPU without PIM operations, using GPU memory. 
+    // Scheduling in the SYCL runtime will ensure 
+    //that this kernel will be executed only
+    // after the PIM operation is done, due to the dependency on bIn4.
+    gpu_queue.submit([&](handler& cgh){
+      auto accIn4 = bIn4.get_access<access_mode::read>(cgh);
+      auto accOut = bOut.get_access<access_mode::read_write>(cgh);
+      cgh.parallel_for<GPUKernelTwo>(dataSize, /* Another SYCL GPU kernel */);
+    });
+  }
+
+  return 0;
+}
+----
+
+The following example demonstrates the use of the `pim_queue`. The
+called function's interface only accepts a single `queue`, but the
+`pim_queue` still allows to select between GPU and PIM device
+internally.
+
+Example 2. Use of the `sycl::ext::samsung::pim_queue` class.
+
+[[cb36]]
+[source,cpp]
+----
+#include <CL/sycl.hpp>
+
+using namespace sycl;
+
+class GPUKernelOne;
+
+void library_function(queue &q, buffer &b1, buffer &b2, buffer &b3){
+  if(/* Data is aligned for PIM */){
+    // Because the command group function lambda requires a pim_handler
+    // to execute, the following command group is submitted to the 
+    // PIM queue wrapped by the pim_queue.
+    q.submit([&](ext::samsung::pim_handler &ph){
+      ext::samsung::pim_accessor pAcc1{b1, ph, read_only};
+      ext::samsung::pim_accessor pAcc2{b2, ph, read_only};
+      ext::samsung::pim_accessor pAcc3{b3, ph, write_only};
+      ph.elementwise_add(pAcc3, pAcc1, pAcc2);
+    });
+  } else {
+    // Because the command group function lambda does not require a 
+    // pim_handler to execute, the following command group is submitted
+    // to the GPU queue wrapped by the pim_queue.
+    q.submit([&](handler &cgh){
+      auto acc1 = b1.get_access<access_mode::read>(cgh);
+      auto acc2 = b2.get_access<access_mode::read>(cgh);
+      auto acc3 = b3.get_access<access_mode::write>(cgh);
+      cgh.parallel_for<GPUKernelOne>(/* Some SYCL GPU kernel */);
+    })
+  }
+}
+
+int main(){
+  constexpr size_t dataSize = 1024;
+  sycl::half in1[dataSize], in2[dataSize], in3[dataSize];
+
+  ext::samsung::pim_queue q{pim_selector{}, gpu_selector{}};
+
+  {
+    // Regular SYCL buffers. 
+    buffer<sycl::half> bIn1{in1, range{dataSize}};
+    buffer<sycl::half> bIn2{in2, range{dataSize}};
+    buffer<sycl::half> bIn3{in3, range{dataSize}};
+
+    // Call the library function which takes a single queue 
+    // as argument on its interface.
+    library_function(q, bIn1, bIn2, bIn3);
+  }
+
+  return 0;
+}
+----
+
+'''''
+<<<
+
+=== Issues
+
+. abc  
+
+<<<
+
+=== Revision History 
+[cols="1,2,2,5"]
+|=======================================================================
+|Rev | Date | Author | Changes 
+
+|1 | 2022-05-25 | Lukas Sommer | Initial draft 
+
+|2 | 2022-06-24 | Lukas Sommer | Update of pim_accessor
+
+|3 | 2022-07-05 | Hyesun Hong  | 
+|=======================================================================
+
+
+
+_Copyright (C) Codeplay Software Limited. All Rights Reserved._
