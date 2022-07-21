@@ -9,11 +9,11 @@ Extension proposal for the integration of PIM operations into SYCL.
 [cols=",",options="header",]
 |=======================================================================
 |Proposal ID |Samsung-001
-|Name |User-Driven Runtime Kernel Fusion
+|Name |Host-initiated Processing-in-Memory
 
 |Date of Creation |30 March 2022
 
-|Last Update |20 June 2022
+|Last Update |21 July 2022
 
 |Version |v0.2
 
@@ -925,9 +925,9 @@ namespace samsung {
                 const async_handler &asyncHandler,
                 const property_list &propList = {});
 
-    queue& get_pim_queue() const;
+    queue& get_pim_queue();
 
-    queue& get_gpu_queue() const;
+    queue& get_gpu_queue();
 
   };
 
@@ -1154,7 +1154,7 @@ a|
 [[cb33]]
 [source,cpp]
 ----
-queue& get_pim_queue() const
+queue& get_pim_queue();
 ----
 
 |Returns a reference to the PIM queue wrapped by this `pim_queue`.
@@ -1162,7 +1162,7 @@ a|
 [[cb34]]
 [source,cpp]
 ----
-queue& get_gpu_queue() const;
+queue& get_gpu_queue();
 ----
 
 |Returns a reference to the GPU queue wrapped by this `pim_queue`.
@@ -1326,7 +1326,9 @@ int main(){
 
 |2 | 2022-06-24 | Lukas Sommer | Update of pim_accessor
 
-|3 | 2022-07-05 | Hyesun Hong  | 
+|3 | 2022-07-05 | Hyesun Hong  |
+
+|4 | 2022-07-21 | Lukas Sommer | Remove incorrect const qualifier
 |=======================================================================
 
 
