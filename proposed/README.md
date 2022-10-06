@@ -13,3 +13,7 @@ sudo gem install pygments.rb
 
 asciidoctor-pdf test.adoc
 ``` 
+
+Or you can get some help from https://docs.asciidoctor.org/pdf-converter/latest/install/.
+When you use the Windows system, this link (https://github.com/asciidoctor/asciidoctor-pdf/issues/2) would be helpful.
+
