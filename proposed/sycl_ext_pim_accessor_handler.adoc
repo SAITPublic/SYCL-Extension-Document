@@ -1313,7 +1313,7 @@ int main(){
 
 === Issues
 
-. abc  
+. TODO: Pim operation and non-pim operation in the same kernel  
 
 <<<
 
