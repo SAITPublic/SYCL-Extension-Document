@@ -21,7 +21,7 @@ Extension proposal for the integration of PIM operations into SYCL.
 
 |Current Status |_Work In Progress_
 
-|Implemented in |_N/A_
+|Implemented in |https://github.com/SAITPublic/PIMMock, https://github.com/SAITPublic/PIMPatches/tree/main/SYCL_dpcpp
 
 |Reply-to |Lukas Sommer lukas.sommer@codeplay.com
 
@@ -1329,6 +1329,8 @@ int main(){
 |3 | 2022-07-05 | Hyesun Hong  |
 
 |4 | 2022-07-21 | Lukas Sommer | Remove incorrect const qualifier
+
+|5 | 2022-10-30 | Hyesun Hong  | Update the implementation detail
 |=======================================================================
 
 
