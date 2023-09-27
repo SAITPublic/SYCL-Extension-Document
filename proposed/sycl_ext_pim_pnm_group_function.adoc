@@ -1,0 +1,952 @@
+= Extension Proposal
+:source-highlighter: pygments
+:source-language: cpp
+
+== SYCL PIM/PNM Extension
+
+Extension proposal for the integration of PIM/PNM operations into SYCL.
+
+[cols=",",options="header",]
+|=======================================================================
+|Proposal ID |Samsung-002
+|Name |Processing-in-Memory and Processing-near-Memory for SYCL device kernels
+
+|Date of Creation |11 July 2022
+
+|Last Update |21 Sep 2023
+
+|Version |v0.2
+
+|Target |SYCL 2020 vendor/Khronos extension
+
+|Current Status |_Work In Progress_
+
+|Implemented in |_N/A_
+
+|Reply-to |Hyesun Hong hyesun.hong@samsung.com, Lukas Sommer lukas.sommer@codeplay.com
+
+|Original author |Hyesun Hong hyesun.hong@samsung.com, Lukas Sommer lukas.sommer@codeplay.com
+
+|Contributors |Hyesun Hong hyesun.hong@samsung.com, Gordon Brown gordon@codeplay.com, Kumudha Narasimhan
+kumudha.narasimhan@codeplay.com, Lukas Sommer lukas.sommer@codeplay.com,
+Mehdi Goli mehdi.goli@codeplay.com, Ruyman Reyes ruyman@codeplay.com,
+Victor Lomüller victor@codeplay.com
+
+|=======================================================================
+
+<<<
+
+=== TL;DR
+Most of existing heterogeneous programming models does not include the concept of _memory with compute_. 
+This document includes the SYCL extension for _Processing in Memory_ (PIM) and _Processing near Memory_ (PNM).
+As far as we know, this document is the first SYCL extension for _Processing near Memory_ (PNM).
+PIM operations such as gemv and element-wise add/mult and PNM operations such as reduction should be seamlessly integrated into the SYCL programming model so that users can access them in a clear and simple fashion. 
+
+
+=== Introduction
+
+Memory technology and in particular memory bandwidth has not been keeping up with
+improvements in processing throughput and computational performance of CPUs and accelerators
+in recent years. Even with a tighter integration of memory and processing elements, for example
+through 2.5D/3D stacking of HBM and accelerators, memory bandwidth is still limited by physical
+limitations and packaging and interconnect technology.
+
+As a consequence, the performance of many applications is limited by the available memory
+bandwidth. One approach to improve the performance of such memory-bound applications is to
+move the computation closer to the required data/memory. Processing in Memory (PIM) integrates
+computational units directly with the memory, and can lift the burden of limited memory
+bandwidth by exploiting the much higher internal bandwidth of many memory units and by
+employing high levels of parallelism, e.g., by concurrently computing across different dies and
+banks. 
+
+Similiarly, leveraging Compute Express Link (CXL) allows memory to be perceived as larger to overcome capacity limitations. 
+However, CXL does not offer enough bandwidth, so to tackle and reduce data trafic, Processing near Memory (PNM) integrates
+computational units near the memory. It processes data interanlly and sends simplified information, which helps reduce 
+the amount of data transerred. 
+    
+An open problem is the integration of the PIM/PNM operation model into existing heterogeneous
+programming models such as SYCL. This extension aims to propose a design to integrate PIM/PNM
+operations into the SYCL programming model.
+
+=== Goals
+
+This proposal tries to achieve the following goals with its
+implementation:
+
+* Seamlessly integrate PIM operations into the SYCL programming model to
+make them available to users in an easy-to-use and comprehensible
+manner.
+
+* Allow a combination of regular, non-PIM/PNM device operations and PIM/PNM operations in the same
+SYCL device kernel. Limited by the then available PIM hardware and SDKs, previous proposals
+to integrate PIM into SYCL did not allow to combine non-PIM and PIM in the same device kernel.
+Instead, the PIM operations were initiated from the host as separate operations.
+
+* Propose a vendor-neutral design, not specific to a certain PIM/PNM hardware or SDK. Given that PIM/PNM
+hardware is still very much under development, future PIM/PNM hardware and SDKs are likely to
+evolve significantly from what is available today. A vendor-neutral design also allows for
+adoption by different hardware vendors, facilitating standardization and portability of user
+applications.
+
+* Make no unrealistic assumptions about the capabilities of PIM/PNM hardware. Even though this
+proposal tries to be abstract from a specific hardware implementation of PIM/PNM and should also
+account for the likely evolution of PIM/PNM, it should still not make any assumptions about certain
+capabilities of PIM hardware that might prove hard to realize in hardware.
+
+=== PIM / PNM  Background
+
+The current hardware implementation of PIM is based on https://ieeexplore.ieee.org/document/9499894[Samsung's PIM hardware]. 
+Additionally, the implementation of PNM and the current developmental direction of PIM and PNM are similar to 
+https://www.servethehome.com/samsung-processing-in-memory-technology-at-hot-chips-2023/[this presentation].
+
+Although current hardware implementations differ significantly and evolution in the future
+is very likely, there is still a set of common characteristics found in many implementations today
+and which are likely to also be found in future PIM/PNM incarnations, which can inform the design of
+this extension:
+
+* Ability to execute basic arithmetic operations with high bandwidth. This ability is at the core of
+PIM hardware and the main driver for potential performance benefits in memory-bound 
+applications. It is enabled by the fact that memory devices such as HBM memory internally
+expose a much higher bandwidth than they can provide through the physically constrained I/O
+interface to the outside. Additionally, bank-level parallelism can be leveraged for parallel
+operation.
+
+* Data layout, placement and aligment are crucial for performance. Some mis-aligned data can not be processced by PIM hardware. 
+However, PNM may support more flexible layouts including random access.
+
+* For PIM, the processing elements are distributed across memory banks and pseudo-channels (pCH),
+rendering full horizontal operation across banks or channels unlikely to be supported.
+
+* For PNM, the processing elements are located in front of the memory controller within CXL controller. 
+It could be utilize rank-level parallelism. For example, GEMV operation can be fully offloaded to PNM, fully utilizing
+DRAM bandwidth and boosting PIM technology.  
+
+* All operands must be present in memory, which might require caches to be flushed or use of a
+write-through caching strategy.
+
+* PIM hardware blocks support only very limited, if at all, control flow instructions. One
+exemption to this rule are loop-like repetition of commands with a fixed trip count known at
+compile-time (sometimes referred to as "zero-overhead looping").
+
+* The programms that can be stored in PIM block program memory are comparably small,
+limited to a small number of commands. This make the use of loop-like repetition of the
+commands in the program memory all the more important.
+
+Beyond the characteristics discussed so far, current implementation of PIM hardware and SDKs
+exhibit further limitations which this proposal assumes to be lifted in the future, as this seems
+likely. Therefore, this extension assumes:
+
+* All addressable (global) device memory is PIM-enabled
+
+* Not all banks/pseudo-channels must be active simultaneously, reducing the minimum
+alignment requirement.
+
+* Alignment requirements can be queried from the SDK and the information exists in the device
+compiler.
+
+=== Design Idea
+
+In the design of this extension, various levels of abstraction needed to be considered.
+
+A rather low-level, explicit modelling of the different components of the PIM/PNM block (e.g., register,
+accumulators) and operations involving these components would quickly lead to a vendor-specific
+extension and would not be portable across different hardware implementations of PIM.
+
+A completely automatic inference of PIM/PNM operations, e.g., from loops for element-wise arithmetic
+operations, would on the other hand place a heavy burden on the PIM/PNM device compiler. In addition,
+this might impose additional constraints on the user code to enable reliable detection, so this
+approach does not seem very robust.
+
+Vector operations, as also included in the SYCL specification, seem like a good, natural fit for the
+SIMD execution model used internally by the PIM/PNM blocks and could be extended for the much wider
+vector sizes used by PIM/PNM. However, a number of characteristics of the vector operations in the SYCL
+specification cast doubt over their suitability for PIM/PNM:
+
+* The SYCL specification defines horizontal operations for vectors, which are not efficiently
+implementable in the distributed processing elements of PIM/PNM.
+* Vector operations give no convergence guarantee for work-items/threads, which will most likely
+be required for PIM/PNM.
+* The vector size explictly stated in the code would need to match the alignment requirement of
+PIM/PNM, restricting the portability of the code between different PIM/PNM implementations.
+
+Given these limitations of vector operations, they don’t seem to be the ideal interface for PIM/PNM
+operations in SYCL.
+
+Instead, group functions seem to be a better fit for the necessary functionality, for the following
+reasons:
+
+* They are easy to use. Being a fairly simple construct, there is not much learning effort required
+on the user’s end to successfully employ group functions to accelerate an application through
+PIM/PNM.
+* They can easily be combined with GPU (or other device) code in the same SYCL kernel, matching
+one of the key requirements for this extension proposal.
+* As discussed earlier, collective operation by multiple threads/work-items is necessary to fully
+utilize the parallel bandwidth of a bank/pseudo-channel. Group functions give the necessary
+convergence criteria for collective operation of work-items in a (sub-)group.
+
+This extension proposal is also not the first proposal to realize the potential of group functions for
+the integration of specific hardware capabilities into SYCL kernels. Other examples for the use of
+group functions to this end include the invoke_simd and the joint_matrix proposal. In the case of tensor cores in 
+NVIDIA GPUs and Intel's AMX and XMX, they exposed the programming interface through joint_matrix extension. 
+
+The proposed group functions are also not necessarily PIM/PNM-specific. While they naturally map to the
+operations that can be executed with high performance on PIM/PNM hardware, other mappings are also
+conceivable. One potential alternative mapping is SIMD vectorization across work-items in a (sub-
+)group, similar to how it is proposed in the invoke_simd proposal.
+
+
+=== Proposal
+
+In order to integrate PIM/PNM operations into the SYCL programming model, this extension proposal
+proposes the additon of five new group functions.
+Three of the new group functions corresponds to a group algorithm already present in the SYCL
+specification, the other two new functions also introduce new group algorithms into the SYCL
+specification.
+The three new group functions are subject to all of the existing restrictions for group functions as
+defined by https://registry.khronos.org/SYCL/specs/sycl-2020/html/sycl-2020.html#sec:group-functions[§4.17.3] 
+of the SYCL 2020 specification. In addition, each of the group functions defines a
+set of additional restrictions on its function arguments, detailed below.
+
+==== joint_reduce and reduce_over_group 
+
+As described by the SYCL specification, the C++ standard reduce function combines the values in a
+range in an unspecified order using a binary operator, and SYCL provides two similar group
+algorithms: joint_reduce and reduce_over_group.
+* `joint_reduce` uses the work-items in a group to execute a reduce operation in parallel
+* `reduce_over_group` combines values held directly by the work-itmes in a group. 
+
+This proposal adds another overload of the existing joint_reduce group functions in https://registry.khronos.org/SYCL/specs/sycl-2020/html/sycl-2020.html#_reduce[§4.17.4.5] 
+of the SYCL 2020 specification. `joint_reduce` function fits PIM more, and `reduce_over_group` function fits PNM more. 
+Just as with the existing overloads, the result of a call to this function is non-deterministic if the
+binary operator is not commutative or associative. Only the binary operators defined in 
+https://registry.khronos.org/SYCL/specs/sycl-2020/html/sycl-2020.html#sec:function-objects[§4.17.2] of
+the SYCL 2020 specification are supported by the new overload, though this proposal uses standard
+C++ syntax for forward compatibility with future SYCL versions.
+
+[[cb1]]
+[source,cpp]
+----
+template <size_t BlockSize, typename Group, typename Ptr, typename BinaryOperation>
+std::iterator_traits<Ptr>::value_type
+joint_reduce(Group g, Ptr data, BinaryOperation binary_op, size_t num_blocks);
+----
+
+Compared to the existing joint_reduce functions in the SYCL specification, this new function
+removes the second pointer pointing one element past the end of the data to process and instead
+adds the BlockSize template argument and num_blocks argument which allow to compute the
+number of elements to process.
+
+Constraints: Available only if sycl::is_group_v<std::decay_t<Group>> is true, Ptr is a pointer to a
+fundamental type and BinaryOperation is a SYCL function object type.
+
+Mandates: binary_op(*data, *data) must return a value of type
+std::iterator_traits<Ptr>::value_type.
+
+Preconditions: data, num_blocks and the type of binary_op must be the same for all work-items in the
+group. binary_op must be an instance of a SYCL function object.
+
+Returns: The result of combining the values resulting from dereferencing all iterators in the range
+[data, data + (num_blocks * BlockSize)) using the operator binary_op, where the values are
+combined according to the generalized sum defined in standard C++.
+
+==== joint_exclusive_scan and joint_inclusive_scan 
+
+As described by the SYCL specification, the exclusive_scand and inclusive_scan functions compute a prefix sum using a binary operator. 
+SYCL provides two similar sets of algorithsm compute the same prefix sums using the generalized noncommutative sum as defined by standard C++. 
+
+This proposal adds another overlaod of the existing joint_exclusive_scan and joint_inclusive_scan group functions in 
+https://registry.khronos.org/SYCL/specs/sycl-2020/html/sycl-2020.html#_exclusive_scan_and_inclusive_scan[§4.17.4.6] of the SYCL 2020 specification.
+The result of a call to a scan is non-deterministic if the binary operator is not associative. Only the binary operators defined in
+https://registry.khronos.org/SYCL/specs/sycl-2020/html/sycl-2020.html#sec:function-objects[§4.17.2] are 
+supported by the scan functions in SYCL 2020, but the standard C++ syntax is used for forward compatibility with future SYCL versions. 
+
+[[cb2]]
+[source,cpp]
+----
+template <size_t BlockSize, typename Group, typename InPtr, typename OutPtr, 
+	typename BinaryOperation>
+OutPtr joint_exclusive_scan(Group g, InPtr first, OutPtr result,
+                            BinaryOperation binary_op, size_t num_blocks);
+
+template<size_t BlockSize, typename Group, typename InPtr, typename OutPtr, 
+	typename BinaryOperation>
+OutPtr joint_inclusive_scan(Group g, InPtr first, OutPtr result, 
+                            BinaryOperation binary_op, size_t num_blocks);
+----
+
+Similarly in joint_reduce, compared to the existing joint_exclusive_scand and joint_inclusive_scan functions in the SYCL specification, this new function
+removes the second pointer pointing one element past the end of the data to process and instead
+adds the BlockSize template argument and num_blocks argument which allow to compute the
+number of elements to process.
+
+Constraints: Available only if sycl::is_group_v<std::decay_t<Group>> is true, InPtr and OutPtr are pointers to fundamental types, and BinaryOperation is a SYCL function object type.
+
+Mandates: binary_op(*first, *first) must return a value of type std::iterator_traits<OutPtr>::value_type.
+
+Preconditions: first, result and the type of binary_op must be the same for all work-items in group g. binary_op must be an instance of a SYCL function object.
+
+Effects: The value written to result + i is the exclusive/inclusive scan of the values resulting from dereferencing the first i values in the range [first, first + (BlockSize * num_blocs) 
+and the identity value of binary_op (as identified by sycl::known_identity), using the operator binary_op. The scan is computed using a generalized noncommutative sum as defined in standard C++.
+
+Returns: A pointer to the end of the output range.
+
+==== joint_transform
+
+The transform function from standard C++ applies the given function to a range and stores the
+result in another range, keeping the original elements order.
+This extension proposal provides a similar algorithm.
+Only the binary operators defined in https://registry.khronos.org/SYCL/specs/sycl-2020/html/sycl-2020.html#sec:function-objects[§4.17.2]
+ of the SYCL 2020 specification are supported by the
+transform function in SYCL 2020, but the standard C++ syntax is used for forward compatibility
+with future SYCL versions.
+
+[[cb3]]
+[source,cpp]
+----
+template <size_t BlockSize, typename Ptr, typename Group, typename BinaryOperation>
+void joint_transform(Group g, const Ptr operand1, const Ptr operand2, Ptr result,
+BinaryOperation binary_op, size_t num_blocks){}
+----
+
+Constraints: Available only if sycl::is_group_v<std::decay_t<Group>> is true, Ptr is a pointer to a
+fundamental type and BinaryOperation is a SYCL function object type.
+
+Mandates: binary_op(*operand1, *operand2) must return a value of type
+std::iterator_traits<Ptr>::value_type.
+
+Preconditions: result, operand1, operand2, num_blocks and the type of binary_op must be the same for
+all work-items in the group. binary_op must be an instance of a SYCL function object.
+
+Returns: Applies the binary_op to each pair of elements in the ranges [operand1, operand1 +
+(num_blocks * BlockSize)) and [operand2, operand2 + (num_blocks * BlockSize)) and stores the
+results in the range [result, result + (num_blocks * BlockSize)), preserving the original order of
+the elements.
+
+==== joint_inner_product
+
+The first overload of the inner_product function from standard C++ computes the inner product (i.e.,
+sum of products) for the two given ranges.
+
+This extension proposal provides a similar algorithm.
+
+[[cb4]]
+[source,cpp]
+----
+template<size_t BlockSize, typename Ptr, typename Group>
+std::iterator_traits<Ptr>::value_type
+joint_inner_product(Group g, const Ptr operand1, const Ptr operand2,
+size_t num_blocks){}
+----
+
+Constraints: Available only if sycl::is_group_v<std::decay_t<Group>> is true and Ptr is a pointer to a
+fundamental type.
+
+Preconditions: operand1, operand2, num_blocks must be the same for all work-items in the group.
+
+Returns: The inner product (sum of products) of the two ranges [operand1, operand1 + (num_blocks
+* BlockSize)) and [operand2, operand2 + (num_blocks * BlockSize)).
+
+=== PIM/PNM Mapping
+
+Note: This section serves an explanatory purpose and is non-normative for the proposed extension.
+
+The following exemplary mapping of the new group functions to PIM/PNM operations could be used to
+accelerate the implementation of the new group functions by utilizing the higher bandwidth of
+PIM/PNM.
+
+* joint_transform with sycl::plus<>: Element-wise addition
+* joint_transform with sycl::multiplies<>: Element-wise multiplication
+* joint_reduce with sycl::multiplies<> or sycl::plus<>:
+** If the PIM hardware supports horizontal operations, the reduction can be performed
+completely in PIM HW.
+** If the PIM hardware does not (or only partially) supports horizontal operations, but the
+input data spans multiple columns, the reduction can partially be performed in PIM HW,
+before being finalized on the host (e.g., GPU)
+* reduce_over_group with sycl::multiplies<> or sycl::plus<>:
+** If the PIM hardware does not (or only partially) supports horizontal operations, and PNM and PIM are 
+together, the reduction can partially be performed in PIM HW, and horizontal operations can be finalized on the PNM.
+* joint_exclusive_scan with sycl::multiplies<> or sycl::plus<>: exclusive product or exclusive sum
+* joint_inclusive_scan with sycl::multiplies<> or sycl::plus<>: inclusive product or inclusive sum 
+* joint_inner_product: Can be mapped to PIM MAC/MAD operation to at least partially perform
+the reduction in PIM HW.
+
+=== Nested scenario where a system contains PIM and PNM together
+
+Although PNM has its benefits when it comes to bandwidth, it has some drawbacks compared to PIM. PNM has fewer opportunities for parallel processing, and it is constrained by the memory controller. As a result, when multiple requests arrive from different ranks or channels, they are processed one after the other, which can result in higher latency. 
+For these reasons, PIM can be used instead of normal device memory. 
+
+We can look at this in two modes: PIM mode and PNM mode.
+
+* PNM mode: 
+** Simultaneous computation in PIM on multiple ranks
+** PIM computes partial result
+** PNM consumes partial results from PIM and produces final result
+
+* PIM mode:
+** Bypasses PNM
+** Run operation directly on one or multiple PIM units
+** Result can be read from memory by host, processed further
+** User need to decide how many blocks are being used
+
+Only one mode will be active at a time.
+
+To map this system into SYCL execution model, each PIM block corresponds to one work-item, and a PNM with all the connected PIM blocks makes up one work-group.
+Therefore, in terms of execution, the operations performed by work-items directly correspond to the operations in PIM. Similarly, group functions are mapped to operations in PNM.
+This means that when a work-item performs an operation, it's as if a PIM block is executing that operation. Likewise, when a group function is carried out, it is equivalent to an operation being performed in PNM.
+
+For instance, if the user wants to accelerate normalization in a system with PIM and PNM, the code can be expressed as follows. 
+
+[[cb5]]
+[source,cpp]
+----
+cgh.parallel_for<class Norm>(nd_range<1>{N}, [=](nd_item<1> item) 
+{
+	auto partialSum = 0;
+	for(size_t j = 0; j < N; j++)
+		partialSum += A[j];
+
+	auto sum = reduce_over_group (i.get_group(), partialSum, std::plus<>());
+
+	A[i] /= sum; 
+});
+----
+
+The computations for the partial results are done in every pim block, and then the overall result is then computed in the PNM through a group function.
+Afterwards, the normalization process is conducted in the PIM block using element-wise operations.
+The number of work-items can range anywhere from one up to the total number of PIM blocks. It's important to note that the user's input must be less than or equal to the number of PIM blocks. 
+If no work-group size is specified, the runtime will automatically select the correct number. This allows for flexibility and efficiency in processing, both in PIM and PNM modes. 
+
+This mapping provides a clear relationship between the execution procedures in our system and the operations in both PIM and PNM modes. 
+
+
+
+
+=== Block Size
+
+Note: This section serves an explanatory purpose and is non-normative for the proposed extension.
+
+Each of the new group functions proposed in this extension proposal takes a BlockSize
+template argument, and the number of (pairs of) elements processed by the group functions is
+given as BlockSize * num_blocks.
+
+As the BlockSize is given as template argument, it can be used by the PIM/PNM device compiler to
+validate and optimize the PIM/PNM execution. There are a number of different cases to consider:
+
+1. BlockSize < minimum size: Issue a compiler warning. PIM/PNM processing of the operation could still
+be possible if num_blocks > 1.
+2. BlockSize == minimum size: Process blocks with PIM/PNM one-by-one.
+3. BlockSize is a multiple of minimum size: Process multiple blocks in a single PIM/PNM program.
+a. Samsung special case: If the BlockSize meets the requirement for the column-aligned mode
+(see https://ieeexplore.ieee.org/document/9499894[Samsung's PIM document]), the compiler can issue a PIM program using the column-aligned mode.
+
+In general, users should always choose the biggest block size possible, as this allows the PIM/PNM device
+compiler to perform optimizations such as using inner repetition with zero-overhead looping
+instead of an outer loop with repeated mode-switches. And the block size required by PNM is usually larger than 
+the block size required by PIM. 
+
+Alternatively, user can specify the appropriate block size through a query. 
+
+The block size can also be leveraged by alternative, non-PIM mappings. For example, when the
+group functions proposed here are mapped to SIMD execution, the BlockSize can help the compiler
+choose an appropriate vector size.
+
+=== Supporting Constructs
+
+In addition to the three new group functions, which form the core of the functionality, this
+extension additionally proposes to add some supporting constructs for the user, on the host side as
+well as the device side.
+
+==== Host Side
+
+The first extension for PIM support on the host side is an addition to the list of device aspects
+defined by https://registry.khronos.org/SYCL/specs/sycl-2020/html/sycl-2020.html#sec:device-aspects[§4.6.4.3]
+ of the SYCL specification. With the new aspect aspect::pim or aspect::pnm, it is possible to query
+whether a device supports PIM/PNM execution.
+
+To retrieve further information about the PIM/PNM capabilities of a device, this extension adds the
+following device information descriptors to the device descriptors defined in 
+https://registry.khronos.org/SYCL/specs/sycl-2020/html/sycl-2020.html#_device_information_descriptors[§4.6.4.2] of the SYCL
+2020 specification.
+
+Table 1. Additional device information descriptors for PIM/PNM.
+
+[width="100%",cols="40%,20%,40%",options="header",]
+|=======================================================================
+|Device descriptors | Return type | Description 
+a|
+`info::device::pim_int_config`, `info:device::pnm_int_config`
+
+a|
+[[cb5]]
+[source,cpp]
+----
+std::vector<int_config>
+----
+
+a|
+
+Returns a `std::vector` of
+`info::int_config` describing the integer
+capability of this PIM/PNM device. The
+`std::vector` may contain zero or more of
+the following values:
+
+* info::int_config::int8
+* info::int_config::int16
+* info::int_config::int32
+* info::int_config::int64
+* info::int_config::uint8
+* info::int_config::uint16
+* info::int_config::uint32
+* info::int_config::uint64
+
+Each of these values indicates whether
+the PIM/PNM device supports computation
+with the corresponding fixed width
+integer type as defined by the C++
+standard (Reference).
+
+If integer computation is supported by
+the PIM/PNM device, there is no minimum
+integer capability. If integer
+computation is not supported by the
+PIM/PNM device, the returned std::vector
+must be empty. 
+
+a|
+`info::device::pim_half_config`,
+`info::device::pnm_half_config`
+
+a|
+[[cb6]]
+[source,cpp]
+----
+std::vector<fp_config>
+----
+
+a|
+
+Returns a `std::vector` of
+`info::int_config` describing the integer
+capability of this PIM/PNM device. The
+`std::vector` may contain zero or more of
+the following values:
+
+* info::int_config::int8
+* info::int_config::int16
+* info::int_config::int32
+* info::int_config::int64
+* info::int_config::uint8
+* info::int_config::uint16
+* info::int_config::uint32
+* info::int_config::uint64
+
+Each of these values indicates whether
+the PIM/PNM device supports computation
+with the corresponding fixed width
+integer type as defined by the C++
+standard (Reference).
+
+If integer computation is supported by
+the PIM/PNM device, there is no minimum
+integer capability. If integer
+computation is not supported by the
+PIM device, the returned std::vector
+must be empty. 
+
+
+a|
+`info::device::pim_int_config`
+`info::device::pnm_int_config`
+
+a|
+[[cb7]]
+[source,cpp]
+----
+std::vector<int_config>
+----
+
+a|
+
+Returns a std::vector of info::fp_config
+describing the half precision floating point
+capability of the PIM/PNM blocks. The
+std::vector may contain zero or more of
+the following values:
+
+* info::fp_config::denorm: denorms
+are supported.
+* info::fp_config::inf_nan: INF and
+quiet NaNs are supported.
+* info::fp_config::round_to_nearest:
+round to nearest even rounding
+mode is supported.
+* info::fp_config::round_to_zero:
+round to zero rounding mode is
+supported.
+* info::fp_config::round_to_info:
+round to positive and negative
+infinity rounding modes are
+supported.
+* info::fp_config::fma: IEEE754-2008
+fused multiply add is supported.
+* info::fp_config::correctly_rounded_
+divide_sqrt: divide and sqrt are
+correctly rounded as defined by the
+IEEE754 specification. This property
+is deprecated.
+* info::fp_config::soft_float: basic
+floating-point operations (such as
+addition, subtraction, multiplication)
+are implemented in software.
+
+If half precision is supported by the PIM/PNM
+blocks, there is no minimum floating point
+capability. If half precision is not
+supported the returned std::vector
+must be empty.
+
+a|
+`info::device::pim_single_fp_config`,
+`info::device::pnm_single_fp_config`
+
+a|
+[[cb8]]
+[source,cpp]
+----
+std::vector<fp_config>
+----
+
+a|
+
+Returns a std::vector of info::fp_config
+describing the single precision floatingpoint
+capability of the PIM/PNM blocks. The
+std::vector may contain zero or more of
+the following values:
+
+* info::fp_config::denorm: denorms
+are supported.
+* info::fp_config::inf_nan: INF and
+quiet NaNs are supported.
+* info::fp_config::round_to_nearest:
+round to nearest even rounding
+mode is supported.
+* info::fp_config::round_to_zero:
+round to zero rounding mode is
+supported.
+* info::fp_config::round_to_info:
+round to positive and negative
+infinity rounding modes are
+supported.
+* info::fp_config::fma: IEEE754-2008
+fused multiply add is supported.
+* info::fp_config::correctly_rounded_
+divide_sqrt: divide and sqrt are
+correctly rounded as defined by the
+IEEE754 specification. This property
+is deprecated.
+* info::fp_config::soft_float: basic
+floating-point operations (such as
+addition, subtraction, multiplication)
+are implemented in software.
+
+If single precision is supported by the
+PIM/PNM blocks, there is no minimum
+floating-point capability. If single
+precision is not supported the returned
+std::vector must be empty. 
+
+a|
+`info::device::pim_double_fp_config`,
+`info::device::pnm_double_fp_config`
+
+a|
+[[cb9]]
+[source,cpp]
+----
+std::vector<int_config>
+----
+
+a|
+
+Returns a std::vector of info::fp_config
+describing the double precision floatingpoint
+capability of the PIM/PNM blocks. The
+std::vector may contain zero or more of
+the following values:
+
+* info::fp_config::denorm: denorms
+are supported.
+* info::fp_config::inf_nan: INF and
+quiet NaNs are supported.
+* info::fp_config::round_to_nearest:
+round to nearest even rounding
+mode is supported.
+* info::fp_config::round_to_zero:
+round to zero rounding mode is
+supported.
+* info::fp_config::round_to_info:
+round to positive and negative
+infinity rounding modes are
+supported.
+* info::fp_config::fma: IEEE754-2008
+fused multiply add is supported.
+* info::fp_config::correctly_rounded_
+divide_sqrt: divide and sqrt are
+correctly rounded as defined by the
+IEEE754 specification. This property
+is deprecated.
+* info::fp_config::soft_float: basic
+floating-point operations (such as
+addition, subtraction, multiplication)
+are implemented in software.
+
+If double precision is supported by the
+PIM/PNM blocks, there is no minimum
+floating-point capability. If double
+precision is not supported the returned
+std::vector must be empty.
+
+a|
+`info::device::pim_minimum_align`,
+`info::device::pnm_minimum_align`
+
+a|
+`uint32_t`
+
+a|
+Returns the minimum alignment in
+bytes required for a pointer to be
+processed by PIM/PNM.
+
+a|
+`info::device::pim_preferred_align`,
+`info::device::pnm_preferred_align`
+
+a|
+`uint32_t`
+
+a|
+Returns the minimum alignment in
+bytes preferred for a pointer to be
+processed by PIM/PNM.
+
+a|
+`info::device::pim_vendor_id`,
+`info::device::pnm_vendor_id`
+
+a|
+`uint32_t`
+
+a|
+Returns a unique vendor identifier for
+the vendor of the PIM/PNM blocks.
+
+a|
+`info::device::pim_vendor`,
+`info::device::pnm_vendor`
+
+a|
+`std::string`
+
+a| 
+Returns the vendor of the PIM/PNM blocks
+
+a|
+`info::device::pim_version`,
+`info::device::pnm_version`
+
+a|
+`std::string`
+
+a|
+Returns a backend-defined version of
+the PIM/PNM blocks.
+
+|=======================================================================
+
+==== Device Side
+
+For the device side, this extension defines three additional free functions that can be used in device
+kernel code (and only there). In contrast to the other functions added by this proposal, these device
+functions are not group functions, so they do not need to be encountered in converged control-flow.
+
+The following table describes the new free functions.
+
+Table 2. Additional device side functions for PIM.
+
+[width="100%",cols="40%,60%",options="header",]
+|=======================================================================
+|Function |Description
+a|
+[[cb10]]
+[source,cpp]
+----
+template<typename Ptr>
+bool pim_is_aligned(const Ptr ptr);
+----
+
+a|
+Returns true if ptr is correctly aligned for the
+minimum alignment requirement of the PIM blocks
+and can be processed by PIM without prolog.
+
+`Ptr` must be a pointer to a fundamental type. ptr must
+be pointing to a memory location in global device
+memory.
+
+If the device on which a kernel calling this function is
+executed does not support PIM (i.e., does not have
+aspect::pim), the return value is implementationdefined.
+
+a|
+[[cb11]]
+[source,cpp]
+----
+uint32_t pim_minimum_align();
+----
+
+a|
+Returns the minimum alignment in bytes required
+for a pointer to be processed by PIM.
+If the device on which a kernel calling this function is
+executed does not support PIM (i.e., does not have
+aspect::pim), the return value is implementationdefined.
+
+a|
+[[cb12]]
+[source,cpp]
+----
+uint32_t pim_preferred_align();
+----
+
+a|
+Returns the alignment in bytes preferred for a
+pointer to be processed by PIM.
+
+If the device on which a kernel calling this function is
+executed does not support PIM (i.e., does not have
+aspect::pim), the return value is implementationdefined.
+
+|=======================================================================
+
+These free functions can be used to switch between different code-paths, depending on the concrete
+alignment requirements of a device containing PIM blocks and selecting the best implementation. 
+If users wish to switch between code-paths depending on the general availability of PIM blocks on a
+device, they can use the device_if extension to query for aspect::pim in device code.
+
+=== Usage Examples
+
+==== Simple Usage Example - Element-wise Addition
+
+The following example demonstrates how the joint_transform group function, that was added as
+part of this extension proposal, can be used to perform an element-wise addition in PIM.
+
+The relevant invocation happens at the code location marked with //(1).
+
+[[cb1]]
+[source,cpp]
+----
+#include <sycl.hpp>
+using namespace sycl;
+int main() {
+    constexpr size_t dataSize = 1280;
+    sycl::half in1[dataSize];
+    sycl::half in2[dataSize];
+    sycl::half out[dataSize];
+    queue q{pim_selector{}};
+    {
+        buffer<sycl::half> bIn1{in1, range{dataSize}};
+        buffer<sycl::half> bIn2{in2, range{dataSize}};
+        buffer<sycl::half> bOut{out, range{dataSize}};
+        q.submit([&](handler &cgh) {
+            auto accIn1 = bIn1.get_access<access_mode::read>(cgh);
+            auto accIn2 = bIn2.get_access<access_mode::read>(cgh);
+            auto accOut = bOut.get_access<access_mode::write>(cgh);
+            cgh.parallel_for<class Kernel>(nd_range<1>{range<1>{10}, range<1>{2}},
+                    [=](nd_item<1> item) {
+                auto groupID = item.get_group(0);
+                auto* in1 = &accIn1[groupID * 128];
+                auto* in2 = &accIn2[groupID * 128];
+                auto* out = &accOut[groupID * 128];
+                joint_transform<64>(item.get_group(), in1, in2, out,
+                                    sycl::plus<>(), 2); // (1)
+            });
+        });
+    }
+    return 0;
+}
+----
+
+==== GEMV Usage Example
+
+The following example domenstrates how the memory-bound GEMV operation can be accelerated
+through PIM by using the joint_inner_product group function added as part of this proposal.
+
+The implementation is straightforward: Each work-group is responsible for computing one element
+of the result vector.
+
+The multiplication of the vector with one column of the input matrix is combined with
+accumulation into the result element in the call to joint_inner_product at the code location marked
+`//(1)`.
+
+[[cb1]]
+[source,cpp]
+----
+int main() {
+    constexpr size_t numRows = 8;
+    constexpr size_t numCols = 8;
+    sycl::half vec[numRows] = ...;
+    
+    /* Matrix stored in *column-major* order */
+    sycl::half mat[numCols * numRows] = ...;
+    sycl::half out[numCols];
+
+    queue q{pim_selector{}};
+    {
+        buffer<sycl::half, 1> bVec{in1, range{numRows}};
+
+        /* Matrix stored in *column-major* order */
+        buffer<sycl::half, 2> bMat{in2, range{numCols, numRows}};
+        buffer<sycl::half, 1> bOut{out, range{numCols}};
+    
+        q.submit([&](handler &cgh) {
+            auto accVec = bVec.get_access<access_mode::read>(cgh);
+            auto accMat = bMat.get_access<access_mode::read>(cgh);
+            auto accOut = bOut.get_access<access_mode::write>(cgh);
+            cgh.parallel_for<class Kernel>(nd_range<1>{range<1>{numCols*numRows},
+                                            range<1>{numRows}},
+                    [=](nd_item<1> item) [[sycl::reqd_work_group_size(8)]] {
+                auto groupID = item.get_group(0);
+                auto vecPtr = &accVec[0];
+                id<2> colIdx{groupID, 0};
+                auto matPtr = &accMat[colIdx];
+                auto result = joint_inner_product<numRows>(item.get_group(), vecPtr,
+                                                            matPtr, 1); // (1)
+                
+                if(item.get_group().leader()){
+                    accOut[groupID] = result;
+                }
+            });
+        });
+    }
+    return 0;
+}
+----
+
+
+=== Revision History 
+[cols="1,2,2,5"]
+|=======================================================================
+|Rev | Date | Author | Changes 
+
+|1 | 2022-07-22 | Lukas Sommer | Initial draft 
+
+|2 | 2023-09-18 | Hyesun Hong | Initial draft
+
+|3 | 2023-09-19 | Hyesun Hong  | Update PNM extensions
+
+|=======================================================================
+
+
