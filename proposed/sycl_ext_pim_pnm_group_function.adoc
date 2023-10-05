@@ -37,10 +37,10 @@ Victor Lomüller victor@codeplay.com
 <<<
 
 === TL;DR
-Most of existing heterogeneous programming models does not include the concept of _memory with compute_. 
+Most of existing heterogeneous programming models do not include the concept of _memory with compute_. 
 This document includes the SYCL extension for _Processing in Memory_ (PIM) and _Processing near Memory_ (PNM).
 As far as we know, this document is the first SYCL extension for _Processing near Memory_ (PNM).
-PIM operations such as gemv and element-wise add/mult and PNM operations such as reduction should be seamlessly integrated into the SYCL programming model so that users can access them in a clear and simple fashion. 
+PIM operations such as GEMV and element-wise add/mult and PNM operations such as reduction should be seamlessly integrated into the SYCL programming model so that users can access them in a clear and simple fashion. 
 
 
 === Introduction
@@ -60,7 +60,7 @@ employing high levels of parallelism, e.g., by concurrently computing across dif
 banks. 
 
 Similiarly, leveraging Compute Express Link (CXL) allows memory to be perceived as larger to overcome capacity limitations. 
-However, CXL does not offer enough bandwidth, so to tackle and reduce data trafic, Processing near Memory (PNM) integrates
+However, CXL does not offer enough bandwidth, so to tackle and reduce data traffic, Processing near Memory (PNM) integrates
 computational units near the memory. It processes data interanlly and sends simplified information, which helps reduce 
 the amount of data transerred. 
     
@@ -117,8 +117,8 @@ However, PNM may support more flexible layouts including random access.
 * For PIM, the processing elements are distributed across memory banks and pseudo-channels (pCH),
 rendering full horizontal operation across banks or channels unlikely to be supported.
 
-* For PNM, the processing elements are located in front of the memory controller within CXL controller. 
-It could be utilize rank-level parallelism. For example, GEMV operation can be fully offloaded to PNM, fully utilizing
+* For PNM, the processing elements are located in front of the memory controller within CXL controller and could be able to
+utilize rank-level parallelism. For example, GEMV operation can be fully offloaded to PNM, fully utilizing
 DRAM bandwidth and boosting PIM technology.  
 
 * All operands must be present in memory, which might require caches to be flushed or use of a
@@ -211,9 +211,10 @@ set of additional restrictions on its function arguments, detailed below.
 
 As described by the SYCL specification, the C++ standard reduce function combines the values in a
 range in an unspecified order using a binary operator, and SYCL provides two similar group
-algorithms: joint_reduce and reduce_over_group.
+algorithms: `joint_reduce` and `reduce_over_group`.
+
 * `joint_reduce` uses the work-items in a group to execute a reduce operation in parallel
-* `reduce_over_group` combines values held directly by the work-itmes in a group. 
+* `reduce_over_group` combines values held directly by the work-items in a group. 
 
 This proposal adds another overload of the existing joint_reduce group functions in https://registry.khronos.org/SYCL/specs/sycl-2020/html/sycl-2020.html#_reduce[§4.17.4.5] 
 of the SYCL 2020 specification. `joint_reduce` function fits PIM more, and `reduce_over_group` function fits PNM more. 
@@ -233,26 +234,26 @@ joint_reduce(Group g, Ptr data, BinaryOperation binary_op, size_t num_blocks);
 
 Compared to the existing joint_reduce functions in the SYCL specification, this new function
 removes the second pointer pointing one element past the end of the data to process and instead
-adds the BlockSize template argument and num_blocks argument which allow to compute the
+adds the `BlockSize` template argument and `num_blocks` argument which allow to compute the
 number of elements to process.
 
-Constraints: Available only if sycl::is_group_v<std::decay_t<Group>> is true, Ptr is a pointer to a
-fundamental type and BinaryOperation is a SYCL function object type.
+Constraints: Available only if `sycl::is_group_v<std::decay_t<Group>>` is `true`, `Ptr` is a pointer to a
+fundamental type and `BinaryOperation` is a SYCL function object type.
 
-Mandates: binary_op(*data, *data) must return a value of type
-std::iterator_traits<Ptr>::value_type.
+Mandates: `binary_op(*data, *data)` must return a value of type
+`std::iterator_traits<Ptr>::value_type`.
 
-Preconditions: data, num_blocks and the type of binary_op must be the same for all work-items in the
-group. binary_op must be an instance of a SYCL function object.
+Preconditions: `data`, `num_blocks` and the type of `binary_op` must be the same for all work-items in the
+group. `binary_op` must be an instance of a SYCL function object.
 
 Returns: The result of combining the values resulting from dereferencing all iterators in the range
-[data, data + (num_blocks * BlockSize)) using the operator binary_op, where the values are
+`[data, data + (num_blocks * BlockSize))` using the operator `binary_op`, where the values are
 combined according to the generalized sum defined in standard C++.
 
 ==== joint_exclusive_scan and joint_inclusive_scan 
 
 As described by the SYCL specification, the exclusive_scand and inclusive_scan functions compute a prefix sum using a binary operator. 
-SYCL provides two similar sets of algorithsm compute the same prefix sums using the generalized noncommutative sum as defined by standard C++. 
+SYCL provides two similar sets of algorithms compute the same prefix sums using the generalized non-commutative sum as defined by standard C++. 
 
 This proposal adds another overlaod of the existing joint_exclusive_scan and joint_inclusive_scan group functions in 
 https://registry.khronos.org/SYCL/specs/sycl-2020/html/sycl-2020.html#_exclusive_scan_and_inclusive_scan[§4.17.4.6] of the SYCL 2020 specification.
@@ -274,19 +275,19 @@ OutPtr joint_inclusive_scan(Group g, InPtr first, OutPtr result,
                             BinaryOperation binary_op, size_t num_blocks);
 ----
 
-Similarly in joint_reduce, compared to the existing joint_exclusive_scand and joint_inclusive_scan functions in the SYCL specification, this new function
+Similarly as for the new overload of `joint_reduce` above, compared to the existing `joint_exclusive_scan` and `joint_inclusive_scan` functions in the SYCL specification, this new function
 removes the second pointer pointing one element past the end of the data to process and instead
-adds the BlockSize template argument and num_blocks argument which allow to compute the
+adds the `BlockSize` template argument and `num_blocks` argument which allow to compute the
 number of elements to process.
 
-Constraints: Available only if sycl::is_group_v<std::decay_t<Group>> is true, InPtr and OutPtr are pointers to fundamental types, and BinaryOperation is a SYCL function object type.
+Constraints: Available only if `sycl::is_group_v<std::decay_t<Group>>` is `true`, `InPtr` and `OutPtr` are pointers to fundamental types, and `BinaryOperation` is a SYCL function object type.
 
-Mandates: binary_op(*first, *first) must return a value of type std::iterator_traits<OutPtr>::value_type.
+Mandates: `binary_op(*first, *first)` must return a value of type `std::iterator_traits<OutPtr>::value_type`.
 
-Preconditions: first, result and the type of binary_op must be the same for all work-items in group g. binary_op must be an instance of a SYCL function object.
+Preconditions: `first`, `result` and the type of `binary_op` must be the same for all work-items in group `g`. `binary_op` must be an instance of a SYCL function object.
 
-Effects: The value written to result + i is the exclusive/inclusive scan of the values resulting from dereferencing the first i values in the range [first, first + (BlockSize * num_blocs) 
-and the identity value of binary_op (as identified by sycl::known_identity), using the operator binary_op. The scan is computed using a generalized noncommutative sum as defined in standard C++.
+Effects: The value written to `result + i` is the exclusive/inclusive scan of the values resulting from dereferencing the first `i` values in the range `[first, first + (BlockSize * num_blocks)`
+and the identity value of `binary_op` (as identified by `sycl::known_identity`), using the operator `binary_op`. The scan is computed using a generalized noncommutative sum as defined in standard C++.
 
 Returns: A pointer to the end of the output range.
 
@@ -296,7 +297,7 @@ The transform function from standard C++ applies the given function to a range a
 result in another range, keeping the original elements order.
 This extension proposal provides a similar algorithm.
 Only the binary operators defined in https://registry.khronos.org/SYCL/specs/sycl-2020/html/sycl-2020.html#sec:function-objects[§4.17.2]
- of the SYCL 2020 specification are supported by the
+of the SYCL 2020 specification are supported by the
 transform function in SYCL 2020, but the standard C++ syntax is used for forward compatibility
 with future SYCL versions.
 
@@ -308,18 +309,18 @@ void joint_transform(Group g, const Ptr operand1, const Ptr operand2, Ptr result
 BinaryOperation binary_op, size_t num_blocks){}
 ----
 
-Constraints: Available only if sycl::is_group_v<std::decay_t<Group>> is true, Ptr is a pointer to a
-fundamental type and BinaryOperation is a SYCL function object type.
+Constraints: Available only if `sycl::is_group_v<std::decay_t<Group>>` is `true`, `Ptr` is a pointer to a
+fundamental type and `BinaryOperation` is a SYCL function object type.
 
-Mandates: binary_op(*operand1, *operand2) must return a value of type
-std::iterator_traits<Ptr>::value_type.
+Mandates: `binary_op(*operand1, *operand2)` must return a value of type
+`std::iterator_traits<Ptr>::value_type`.
 
-Preconditions: result, operand1, operand2, num_blocks and the type of binary_op must be the same for
-all work-items in the group. binary_op must be an instance of a SYCL function object.
+Preconditions: `result`, `operand1`, `operand2`, `num_blocks` and the type of `binary_op` must be the same for
+all work-items in the group. `binary_op` must be an instance of a SYCL function object.
 
-Returns: Applies the binary_op to each pair of elements in the ranges [operand1, operand1 +
-(num_blocks * BlockSize)) and [operand2, operand2 + (num_blocks * BlockSize)) and stores the
-results in the range [result, result + (num_blocks * BlockSize)), preserving the original order of
+Returns: Applies the binary_op to each pair of elements in the ranges 
+`[operand1, operand1 + (num_blocks * BlockSize))` and `[operand2, operand2 + (num_blocks * BlockSize))` and stores the
+results in the range `[result, result + (num_blocks * BlockSize))`, preserving the original order of
 the elements.
 
 ==== joint_inner_product
@@ -338,13 +339,13 @@ joint_inner_product(Group g, const Ptr operand1, const Ptr operand2,
 size_t num_blocks){}
 ----
 
-Constraints: Available only if sycl::is_group_v<std::decay_t<Group>> is true and Ptr is a pointer to a
+Constraints: Available only if `sycl::is_group_v<std::decay_t<Group>>` is `true` and `Ptr` is a pointer to a
 fundamental type.
 
-Preconditions: operand1, operand2, num_blocks must be the same for all work-items in the group.
+Preconditions: `operand1`, `operand2`, `num_blocks` must be the same for all work-items in the group.
 
-Returns: The inner product (sum of products) of the two ranges [operand1, operand1 + (num_blocks
-* BlockSize)) and [operand2, operand2 + (num_blocks * BlockSize)).
+Returns: The inner product (sum of products) of the two ranges 
+`[operand1, operand1 + (num_blocks* BlockSize))` and `[operand2, operand2 + (num_blocks * BlockSize))`.
 
 === PIM/PNM Mapping
 
@@ -425,18 +426,18 @@ This mapping provides a clear relationship between the execution procedures in o
 
 Note: This section serves an explanatory purpose and is non-normative for the proposed extension.
 
-Each of the new group functions proposed in this extension proposal takes a BlockSize
+Each of the new group functions proposed in this extension proposal takes a `BlockSize`
 template argument, and the number of (pairs of) elements processed by the group functions is
-given as BlockSize * num_blocks.
+given as `BlockSize * num_blocks`.
 
 As the BlockSize is given as template argument, it can be used by the PIM/PNM device compiler to
 validate and optimize the PIM/PNM execution. There are a number of different cases to consider:
 
-1. BlockSize < minimum size: Issue a compiler warning. PIM/PNM processing of the operation could still
+1. `BlockSize` < minimum size: Issue a compiler warning. PIM/PNM processing of the operation could still
 be possible if num_blocks > 1.
-2. BlockSize == minimum size: Process blocks with PIM/PNM one-by-one.
-3. BlockSize is a multiple of minimum size: Process multiple blocks in a single PIM/PNM program.
-a. Samsung special case: If the BlockSize meets the requirement for the column-aligned mode
+2. `BlockSize` == minimum size: Process blocks with PIM/PNM one-by-one.
+3. `BlockSize` is a multiple of minimum size: Process multiple blocks in a single PIM/PNM program.
+a. Samsung special case: If the `BlockSize` meets the requirement for the column-aligned mode
 (see https://ieeexplore.ieee.org/document/9499894[Samsung's PIM document]), the compiler can issue a PIM program using the column-aligned mode.
 
 In general, users should always choose the biggest block size possible, as this allows the PIM/PNM device
@@ -447,7 +448,7 @@ the block size required by PIM.
 Alternatively, user can specify the appropriate block size through a query. 
 
 The block size can also be leveraged by alternative, non-PIM mappings. For example, when the
-group functions proposed here are mapped to SIMD execution, the BlockSize can help the compiler
+group functions proposed here are mapped to SIMD execution, the `BlockSize` can help the compiler
 choose an appropriate vector size.
 
 === Supporting Constructs
@@ -522,48 +523,6 @@ a|
 [source,cpp]
 ----
 std::vector<fp_config>
-----
-
-a|
-
-Returns a `std::vector` of
-`info::int_config` describing the integer
-capability of this PIM/PNM device. The
-`std::vector` may contain zero or more of
-the following values:
-
-* info::int_config::int8
-* info::int_config::int16
-* info::int_config::int32
-* info::int_config::int64
-* info::int_config::uint8
-* info::int_config::uint16
-* info::int_config::uint32
-* info::int_config::uint64
-
-Each of these values indicates whether
-the PIM/PNM device supports computation
-with the corresponding fixed width
-integer type as defined by the C++
-standard (Reference).
-
-If integer computation is supported by
-the PIM/PNM device, there is no minimum
-integer capability. If integer
-computation is not supported by the
-PIM device, the returned std::vector
-must be empty. 
-
-
-a|
-`info::device::pim_int_config`
-`info::device::pnm_int_config`
-
-a|
-[[cb7]]
-[source,cpp]
-----
-std::vector<int_config>
 ----
 
 a|
